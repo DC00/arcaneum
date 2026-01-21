@@ -1,11 +1,12 @@
-"""Collection management CLI commands (RDR-003 with RDR-006 enhancements)."""
+"""Collection management CLI commands (RDR-003 with RDR-006, RDR-017 enhancements)."""
 
+import json
 import sys
 from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, HnswConfigDiff
+from qdrant_client.models import HnswConfigDiff
 
 from arcaneum.config import load_config, ArcaneumConfig, DEFAULT_MODELS
 from arcaneum.embeddings.client import EMBEDDING_MODELS
@@ -16,27 +17,11 @@ from arcaneum.indexing.collection_metadata import (
     CollectionType,
 )
 from arcaneum.cli.errors import InvalidArgumentError, ResourceNotFoundError
+from arcaneum.cli.interaction_logger import interaction_logger
 from arcaneum.cli.output import print_json, print_error, print_success
-from arcaneum.cli.utils import create_qdrant_client
+from arcaneum.cli.utils import create_qdrant_client, build_vectors_config, get_model_dimensions
 
 console = Console()
-
-
-def get_distance(distance_str: str) -> Distance:
-    """Convert distance string to Qdrant Distance enum.
-
-    Args:
-        distance_str: Distance metric name (cosine, euclid, dot)
-
-    Returns:
-        Distance enum value
-    """
-    distance_map = {
-        "cosine": Distance.COSINE,
-        "euclid": Distance.EUCLID,
-        "dot": Distance.DOT,
-    }
-    return distance_map.get(distance_str.lower(), Distance.COSINE)
 
 
 def create_collection_command(
@@ -59,6 +44,14 @@ def create_collection_command(
         output_json: Output as JSON
         collection_type: Type of collection ("pdf", "code", or "markdown")
     """
+    # Start interaction logging (RDR-018)
+    interaction_logger.start(
+        "collection", "create",
+        collection=name,
+        collection_type=collection_type,
+        model=model,
+    )
+
     try:
         # Infer model from collection_type if not provided
         if model is None:
@@ -78,23 +71,12 @@ def create_collection_command(
             if model is None:
                 raise InvalidArgumentError(f"Unknown collection type: {collection_type}")
 
-        # Parse models (support comma-separated list)
+        # Parse models (support comma-separated list) and build vectors config
         model_list = [m.strip() for m in model.split(',')]
-
-        # Validate models
-        for m in model_list:
-            if m not in EMBEDDING_MODELS:
-                error_msg = f"Unknown model: {m}. Available: {list(EMBEDDING_MODELS.keys())}"
-                raise InvalidArgumentError(error_msg)
-
-        # Build vectors config
-        vectors_config = {}
-        for m in model_list:
-            model_info = EMBEDDING_MODELS[m]
-            vectors_config[m] = VectorParams(
-                size=model_info["dimensions"],
-                distance=Distance.COSINE,
-            )
+        try:
+            vectors_config = build_vectors_config(model_list)
+        except ValueError as e:
+            raise InvalidArgumentError(str(e))
 
         # Connect to Qdrant
         client = create_qdrant_client()
@@ -140,9 +122,14 @@ def create_collection_command(
                 dims = EMBEDDING_MODELS[m]["dimensions"]
                 console.print(f"  • {m}: {dims}D")
 
+        # Log successful operation (RDR-018)
+        interaction_logger.finish()
+
     except (InvalidArgumentError, ResourceNotFoundError):
+        interaction_logger.finish(error="invalid argument or resource not found")
         raise  # Re-raise our custom exceptions to be handled by main()
     except Exception as e:
+        interaction_logger.finish(error=str(e))
         print_error(f"Failed to create collection: {e}", output_json)
         sys.exit(1)
 
@@ -154,6 +141,9 @@ def list_collections_command(verbose: bool, output_json: bool):
         verbose: Show detailed information
         output_json: Output as JSON
     """
+    # Start interaction logging (RDR-018)
+    interaction_logger.start("collection", "list")
+
     try:
         client = create_qdrant_client()
         collections = client.get_collections()
@@ -206,7 +196,11 @@ def list_collections_command(verbose: bool, output_json: bool):
 
             console.print(table)
 
+        # Log successful operation (RDR-018)
+        interaction_logger.finish(result_count=len(collections.collections))
+
     except Exception as e:
+        interaction_logger.finish(error=str(e))
         print_error(f"Failed to list collections: {e}", output_json)
         sys.exit(1)
 
@@ -219,13 +213,16 @@ def delete_collection_command(name: str, confirm: bool, output_json: bool):
         confirm: Skip confirmation prompt
         output_json: Output as JSON
     """
+    # Start interaction logging (RDR-018)
+    interaction_logger.start("collection", "delete", collection=name)
+
     try:
         if not confirm:
             if output_json:
                 raise InvalidArgumentError("--confirm flag required for non-interactive deletion")
 
-            response = console.input(f"[yellow]Delete collection '{name}'? This cannot be undone. (yes/no): [/yellow]")
-            if response.lower() != 'yes':
+            import click
+            if not click.confirm(f"Delete collection '{name}'? This cannot be undone."):
                 console.print("Cancelled.")
                 return
 
@@ -237,9 +234,14 @@ def delete_collection_command(name: str, confirm: bool, output_json: bool):
         else:
             console.print(f"[green]✅ Deleted collection '{name}'[/green]")
 
+        # Log successful operation (RDR-018)
+        interaction_logger.finish()
+
     except (InvalidArgumentError, ResourceNotFoundError):
+        interaction_logger.finish(error="invalid argument or resource not found")
         raise  # Re-raise our custom exceptions
     except Exception as e:
+        interaction_logger.finish(error=str(e))
         print_error(f"Failed to delete collection: {e}", output_json)
         sys.exit(1)
 
@@ -251,6 +253,9 @@ def info_collection_command(name: str, output_json: bool):
         name: Collection name
         output_json: Output as JSON
     """
+    # Start interaction logging (RDR-018)
+    interaction_logger.start("collection", "info", collection=name)
+
     try:
         client = create_qdrant_client()
         info = client.get_collection(name)
@@ -304,7 +309,11 @@ def info_collection_command(name: str, output_json: bool):
             console.print(f"  m: {hnsw.m}")
             console.print(f"  ef_construct: {hnsw.ef_construct}")
 
+        # Log successful operation (RDR-018)
+        interaction_logger.finish()
+
     except Exception as e:
+        interaction_logger.finish(error=str(e))
         print_error(f"Failed to get collection info: {e}", output_json)
         sys.exit(1)
 
@@ -316,6 +325,9 @@ def items_collection_command(name: str, output_json: bool):
         name: Collection name
         output_json: Output as JSON
     """
+    # Start interaction logging (RDR-018)
+    interaction_logger.start("collection", "items", collection=name)
+
     try:
         client = create_qdrant_client()
 
@@ -449,7 +461,11 @@ def items_collection_command(name: str, output_json: bool):
                     )
                 console.print(table)
 
+        # Log successful operation (RDR-018)
+        interaction_logger.finish(result_count=len(items_list))
+
     except Exception as e:
+        interaction_logger.finish(error=str(e))
         print_error(f"Failed to list collection items: {e}", output_json)
         sys.exit(1)
 
@@ -468,6 +484,9 @@ def verify_collection_command(
         verbose: Show detailed file-level results
         output_json: Output as JSON
     """
+    # Start interaction logging (RDR-018)
+    interaction_logger.start("collection", "verify", collection=name, project=project)
+
     try:
         from arcaneum.indexing.verify import CollectionVerifier
 
@@ -606,7 +625,233 @@ def verify_collection_command(
                     if len(needs_repair) > 10:
                         console.print(f"  [dim]... and {len(needs_repair) - 10} more[/dim]")
 
+        # Log successful operation (RDR-018)
+        interaction_logger.finish(
+            result_count=result.total_items,
+            is_healthy=result.is_healthy,
+            incomplete_items=result.incomplete_items,
+        )
+
     except Exception as e:
+        interaction_logger.finish(error=str(e))
         print_error(f"Failed to verify collection: {e}", output_json)
         sys.exit(1)
 
+
+def export_collection_command(
+    name: str,
+    output: str,
+    fmt: str,
+    includes: tuple,
+    excludes: tuple,
+    repos: tuple,
+    detach: bool,
+    output_json: bool,
+):
+    """Export collection to portable format (RDR-017).
+
+    Args:
+        name: Collection name to export
+        output: Output file path
+        fmt: Export format (binary or jsonl)
+        includes: Include patterns for file_path
+        excludes: Exclude patterns for file_path
+        repos: Repo filters (code collections)
+        detach: Strip root prefix, store relative paths
+        output_json: Output as JSON
+    """
+    from arcaneum.cli.export_import import (
+        BinaryExporter,
+        JsonlExporter,
+        build_export_filter,
+    )
+
+    # Start interaction logging (RDR-018)
+    interaction_logger.start(
+        "collection", "export",
+        collection=name,
+        format=fmt,
+        detach=detach,
+    )
+
+    try:
+        client = create_qdrant_client()
+        output_path = Path(output)
+
+        # Build filters
+        scroll_filter, path_filter = build_export_filter(
+            includes=includes,
+            excludes=excludes,
+            repos=repos,
+        )
+
+        # Select exporter
+        if fmt == "jsonl":
+            exporter = JsonlExporter(client)
+        else:
+            exporter = BinaryExporter(client)
+
+        if output_json:
+            # No progress display for JSON output
+            result = exporter.export(
+                collection_name=name,
+                output_path=output_path,
+                scroll_filter=scroll_filter,
+                path_filter=path_filter,
+                detach=detach,
+            )
+        else:
+            # Use Rich status for progress display
+            from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                console=console,
+            ) as progress_bar:
+                task = progress_bar.add_task("Exporting...", total=None)
+
+                def progress(current, total):
+                    if progress_bar.tasks[task].total is None:
+                        progress_bar.update(task, total=total)
+                    progress_bar.update(task, completed=current)
+
+                result = exporter.export(
+                    collection_name=name,
+                    output_path=output_path,
+                    scroll_filter=scroll_filter,
+                    path_filter=path_filter,
+                    detach=detach,
+                    progress_callback=progress,
+                )
+
+        if not output_json:
+            size_mb = result.file_size_bytes / (1024 * 1024)
+            console.print(f"[green]Exported {result.exported_count} points to {result.output_path}[/green]")
+            console.print(f"File size: {size_mb:.2f} MB")
+            if result.detached:
+                console.print(f"[dim]Root prefix stripped: {result.root_prefix}[/dim]")
+                console.print(f"[dim]Use --attach on import to prepend new root[/dim]")
+        else:
+            print_json("success", f"Exported {result.exported_count} points", result.to_dict())
+
+        # Log successful operation (RDR-018)
+        interaction_logger.finish(
+            exported_count=result.exported_count,
+            file_size_bytes=result.file_size_bytes,
+        )
+
+    except Exception as e:
+        interaction_logger.finish(error=str(e))
+        print_error(f"Failed to export collection: {e}", output_json)
+        sys.exit(1)
+
+
+def import_collection_command(
+    file: str,
+    target_name: str,
+    attach_root: str,
+    remaps: tuple,
+    output_json: bool,
+):
+    """Import collection from export file (RDR-017).
+
+    Args:
+        file: Input file path
+        target_name: Target collection name
+        attach_root: Root path to prepend to relative paths
+        remaps: Path substitutions (old:new format)
+        output_json: Output as JSON
+    """
+    from arcaneum.cli.export_import import BinaryImporter, JsonlImporter
+
+    # Start interaction logging (RDR-018)
+    interaction_logger.start(
+        "collection", "import",
+        source_file=file,
+        target_name=target_name,
+    )
+
+    try:
+        client = create_qdrant_client()
+        input_path = Path(file)
+
+        # Parse path remappings
+        path_remaps = []
+        for remap in remaps:
+            if ":" not in remap:
+                raise InvalidArgumentError(
+                    "--remap requires old:new format (e.g., /old/path:/new/path)"
+                )
+            old, new = remap.split(":", 1)
+            path_remaps.append((old, new))
+
+        # Auto-detect format by reading first bytes
+        with open(input_path, "rb") as f:
+            magic = f.read(4)
+
+        # gzip files start with 0x1f 0x8b
+        if magic[:2] == b"\x1f\x8b":
+            importer = BinaryImporter(client)
+        else:
+            importer = JsonlImporter(client)
+
+        if output_json:
+            # No progress display for JSON output
+            result = importer.import_collection(
+                input_path=input_path,
+                target_name=target_name,
+                attach_root=attach_root,
+                path_remaps=path_remaps if path_remaps else None,
+            )
+        else:
+            # Use Rich status for progress display
+            from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                console=console,
+            ) as progress_bar:
+                task = progress_bar.add_task("Importing...", total=None)
+
+                def progress(current, total):
+                    if progress_bar.tasks[task].total is None:
+                        progress_bar.update(task, total=total)
+                    progress_bar.update(task, completed=current)
+
+                result = importer.import_collection(
+                    input_path=input_path,
+                    target_name=target_name,
+                    attach_root=attach_root,
+                    path_remaps=path_remaps if path_remaps else None,
+                    progress_callback=progress,
+                )
+
+        if not output_json:
+            console.print(
+                f"[green]Imported {result.imported_count} points into "
+                f"'{result.collection_name}'[/green]"
+            )
+            if result.collection_type:
+                console.print(f"Collection type: {result.collection_type}")
+        else:
+            print_json("success", f"Imported {result.imported_count} points", result.to_dict())
+
+        # Log successful operation (RDR-018)
+        interaction_logger.finish(
+            imported_count=result.imported_count,
+            collection_name=result.collection_name,
+        )
+
+    except InvalidArgumentError:
+        interaction_logger.finish(error="invalid argument")
+        raise
+    except Exception as e:
+        interaction_logger.finish(error=str(e))
+        print_error(f"Failed to import collection: {e}", output_json)
+        sys.exit(1)

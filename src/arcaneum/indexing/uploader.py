@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Set
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+import gc
 import logging
 import os
 import sys
@@ -167,7 +168,8 @@ class PDFBatchUploader:
         pdf_idx: int,
         total_pdfs: int,
         worker_id: int = 0,
-        scanned_files: Optional[Set[str]] = None
+        scanned_files: Optional[Set[str]] = None,
+        force_reindex: bool = False
     ) -> Tuple[List[PointStruct], int, Optional[str]]:
         """Process a single PDF: extract, OCR, chunk, embed, create points.
 
@@ -182,6 +184,7 @@ class PDFBatchUploader:
             pdf_idx: Current PDF index (for progress)
             total_pdfs: Total number of PDFs (for progress)
             worker_id: ID of worker processing this PDF (for per-worker embedding client)
+            force_reindex: If True, skip content hash check and reindex even if already indexed
 
         Returns:
             Tuple of (points list, chunk count, error message or None)
@@ -199,7 +202,8 @@ class PDFBatchUploader:
 
             # Stage 0.5: Check if content exists (by file_hash) - if so, handle as metadata update, not re-index
             # This prevents re-indexing files that just need metadata migration (file_quick_hashes dict)
-            old_paths = self.sync.find_file_by_content_hash(collection_name, file_hash)
+            # Skip this check if force_reindex is True - we want to reindex regardless
+            old_paths = self.sync.find_file_by_content_hash(collection_name, file_hash) if not force_reindex else []
             if old_paths:
                 # Check if any old paths still exist on filesystem
                 existing_old_paths = self.sync.filter_existing_paths(old_paths)
@@ -273,6 +277,9 @@ class PDFBatchUploader:
                 text, extract_meta = self.extractor.extract(pdf_path)
                 print(f"{timestamp()}      extracted {len(text)} chars", flush=True)
 
+            # Memory cleanup after PDF extraction (pymupdf4llm can hold large buffers)
+            gc.collect()
+
             # Stage 2: OCR (if needed)
             if self.ocr_enabled and len(text) < self.ocr_threshold:
                 import pymupdf as fitz
@@ -293,6 +300,9 @@ class PDFBatchUploader:
 
                 if verbose:
                     print(f"{timestamp()}      OCR complete", flush=True)
+
+                # Memory cleanup after OCR (releases image buffers)
+                gc.collect()
 
             # Chunk text with file metadata (two-pass sync support)
             file_path_abs = str(pdf_path.absolute())
@@ -381,6 +391,9 @@ class PDFBatchUploader:
                     self._upload_batch(collection_name, points)
                     uploaded_count += len(points)
 
+                    # Release batch_embeddings reference to prevent accumulation in callback closure
+                    del batch_embeddings
+
                 # Embed with streaming (accumulate=False)
                 embedding_client.embed_parallel(
                     texts,
@@ -399,10 +412,13 @@ class PDFBatchUploader:
                     print(f"\r{embedding_ts}   → embedding ({file_chunk_count} chunks) [{total_batches}/{total_batches} batches]    ")
                     print(f"{timestamp()}      embedded {file_chunk_count} chunks in {embedding_elapsed:.2f}s ({total_batches} batches of {self.embedding_batch_size}, {embedding_elapsed/total_batches:.2f}s/batch)", flush=True)
 
-                # Clear lists to free memory
+                # Memory cleanup (streaming mode)
+                # Release large data structures and clear GPU cache between PDFs
                 del texts, chunks
-                import gc
                 gc.collect()
+                # Clear GPU cache if using GPU to prevent memory buildup across PDFs
+                if embedding_client.use_gpu:
+                    embedding_client._clear_gpu_cache()
 
             else:
                 # Non-streaming mode: embed all, then upload in batches (original behavior)
@@ -462,11 +478,13 @@ class PDFBatchUploader:
                     uploaded_count += len(points_batch)
                     points_batch.clear()
 
-                # Clear large lists to free memory and garbage collect ONCE per file (arcaneum-d432)
-                # This reduces gc.collect() overhead from 100+ calls to ~1 per file
+                # Memory cleanup (non-streaming mode)
+                # Release large data structures and clear GPU cache between PDFs
                 del texts, embeddings, chunks, points_batch
-                import gc
                 gc.collect()
+                # Clear GPU cache if using GPU to prevent memory buildup across PDFs
+                if embedding_client.use_gpu:
+                    embedding_client._clear_gpu_cache()
 
             # Return empty list since we already uploaded
             # uploaded_count is used for stats
@@ -547,15 +565,19 @@ class PDFBatchUploader:
         scanned_files = {str(p.absolute()) for p in all_pdf_files}
 
         # Filter to unindexed files via metadata queries (unless force_reindex)
-        if verbose:
-            print(f"{timestamp()} 🔍 Scanning collection for existing files...")
+        logger.debug(f"force_reindex={force_reindex}")
 
         if force_reindex:
+            if verbose:
+                print(f"{timestamp()} 🔄 Force reindex enabled, skipping sync check...")
             pdf_files = all_pdf_files
             logger.info(f"Force reindex: processing all {len(pdf_files)} PDFs")
             if verbose:
                 print(f"{timestamp()} 🔄 Force reindex: {len(pdf_files)} PDFs to process")
         else:
+            if verbose:
+                print(f"{timestamp()} 🔍 Scanning collection for existing files...")
+
             pdf_files, already_indexed = self.sync.get_unindexed_files(collection_name, all_pdf_files)
 
             logger.info(f"Incremental sync: {len(pdf_files)} need processing, "
@@ -619,7 +641,8 @@ class PDFBatchUploader:
                             pdf_idx,
                             total_pdfs,
                             worker_id,
-                            scanned_files
+                            scanned_files,
+                            force_reindex
                         )
                         future_to_pdf[future] = (pdf_idx, pdf_path)
 
@@ -690,7 +713,8 @@ class PDFBatchUploader:
                         pdf_idx,
                         total_pdfs,
                         0,  # worker_id = 0 for sequential mode
-                        scanned_files
+                        scanned_files,
+                        force_reindex
                     )
 
                     if error:

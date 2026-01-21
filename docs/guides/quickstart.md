@@ -52,7 +52,7 @@ Let's index some code and perform your first search.
 
 ### 1. Start Services
 
-Start Qdrant (the vector database):
+Start the search services (Qdrant for semantic search, MeiliSearch for full-text):
 
 ```bash
 arc container start
@@ -65,8 +65,13 @@ You should see:
 Qdrant started successfully
   REST API: http://localhost:6333
   Dashboard: http://localhost:6333/dashboard
-  Data: /Users/you/.arcaneum/data
+MeiliSearch started successfully
+  HTTP API: http://localhost:7700
+
+[INFO] Data directory: /Users/you/.local/share/arcaneum
 ```
+
+Note: MeiliSearch API key is auto-generated and stored in `~/.config/arcaneum/meilisearch.key`.
 
 ### 2. Create a Collection
 
@@ -120,9 +125,29 @@ arc index pdf ~/Documents/papers --collection MyDocs
 # Index with larger batch size for better throughput
 arc index pdf ~/Documents/papers --collection MyDocs --embedding-batch-size 500
 
-# Search PDFs
+# Search PDFs semantically
 arc search semantic "machine learning techniques" --collection MyDocs
 ```
+
+### Full-Text PDF Search
+
+For exact phrase and keyword search, index PDFs to MeiliSearch.
+The `arc indexes` commands mirror `arc collection` commands:
+
+```bash
+# Create MeiliSearch index (mirrors arc collection create)
+arc indexes create pdf-docs --type pdf
+
+# Index PDFs for full-text search
+arc index text pdf ~/Documents/papers --index pdf-docs
+
+# Search for exact phrases
+arc search text '"neural network architecture"' --index pdf-docs
+```
+
+**Tip:** Use both semantic search (Qdrant) for conceptual matches and full-text
+search (MeiliSearch) for exact phrases. See [PDF Indexing Guide](pdf-indexing.md)
+for the dual indexing workflow.
 
 ### Multi-Branch Code Indexing
 
@@ -159,7 +184,7 @@ arc container logs
 
 ### Cache Management
 
-Arcaneum stores embedding models in `~/.arcaneum/models/`:
+Arcaneum stores embedding models in XDG-compliant locations:
 
 ```bash
 # View cache location and size
@@ -171,21 +196,29 @@ arc config clear-cache --confirm
 
 ### Data Location
 
-All data is stored in `~/.arcaneum/`:
+Arcaneum stores data in XDG-compliant locations:
 
 ```text
-~/.arcaneum/
-├── models/              # Embedding models (auto-downloaded)
-├── data/
-│   ├── qdrant/         # Vector database storage
-│   └── qdrant_snapshots/  # Backups
+~/.cache/arcaneum/models/        # Embedding models (~1-2GB per model)
+~/.local/share/arcaneum/         # Local databases and indexed content
+~/.config/arcaneum/              # Configuration files (e.g., MeiliSearch key)
+```
+
+**Vector Database (Docker):**
+
+Qdrant and MeiliSearch use Docker named volumes for data persistence:
+
+```text
+qdrant-arcaneum-storage    # Qdrant vector database storage
+qdrant-arcaneum-snapshots  # Qdrant backup snapshots
+meilisearch-arcaneum-data  # MeiliSearch full-text index
 ```
 
 **Benefits:**
 
-- Easy to backup (just backup `~/.arcaneum/`)
-- Easy to find and manage
-- Survives container restarts
+- XDG-compliant paths (follows Linux/macOS standards)
+- Reliable data persistence across container restarts
+- Easy backup via Qdrant snapshots
 
 ## Troubleshooting
 
@@ -408,19 +441,28 @@ arc container start          # Start services
 arc container stop           # Stop services
 arc container status         # Check status
 
-# Collections
+# Collections (Qdrant)
 arc collection list                    # List all collections
 arc collection create NAME --model MODEL --type TYPE
 arc collection items NAME              # List indexed files/repos
 arc collection delete NAME --confirm
 
-# Indexing
+# Full-Text Indexes (MeiliSearch) - mirrors arc collection
+arc indexes create NAME --type TYPE
+arc indexes list
+arc indexes info NAME
+arc indexes delete NAME --confirm
+
+# Indexing (Semantic - Qdrant)
 arc index code PATH --collection NAME
 arc index pdf PATH --collection NAME
 
+# Indexing (Full-Text - MeiliSearch)
+arc index text pdf PATH --index NAME
+
 # Searching
-arc search semantic "query" --collection NAME
-arc search semantic "query" --collection NAME --limit 20
+arc search semantic "query" --collection NAME   # Semantic search
+arc search text "query" --index NAME            # Full-text search
 
 # Configuration
 arc config show-cache-dir    # Show cache location

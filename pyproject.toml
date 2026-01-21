@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arcaneum"
-version = "0.1.0"
+version = "0.2.0"
 description = "CLI tools for semantic and full-text search with Qdrant and MeiliSearch"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -25,7 +25,7 @@ dependencies = [
     "qdrant-client>=1.16.1",
     "fastembed>=0.7.3",
     "sentence-transformers>=5.2.0",  # 5.2.0 fixes compatibility with torch 2.9+
-    "transformers>=4.40.0",
+    "transformers>=4.40.0,<4.54.0",  # 4.54+ has DynamicCache breaking change (see docs/DEPENDENCY_NOTES.md)
     "torch>=2.8.0",  # 2.9.x now works with sentence-transformers 5.2.0+
     "pyyaml>=6.0.3",
     "rich>=14.2.0",
@@ -41,7 +41,7 @@ dependencies = [
     "pdfplumber>=0.11.7",
     "pytesseract>=0.3.13",
     "pdf2image>=1.17.0",
-    "opencv-python-headless>=4.12.0",
+    "opencv-python-headless>=4.10.0",
     # Source code indexing dependencies (RDR-005)
     "tree-sitter-language-pack>=0.10.0",
     "llama-index-core>=0.14.6",
@@ -52,6 +52,11 @@ dependencies = [
     "pygments>=2.19.0",
     # SOCKS proxy support for httpx (required when running in Claude Code sandbox)
     "socksio>=1.0.0",
+    # Collection export/import (RDR-017)
+    "msgpack>=1.1.0",
+    "numpy>=1.26.0",
+    # Full-text search (RDR-008)
+    "meilisearch>=0.31.0",
 ]
 
 [project.optional-dependencies]
@@ -78,3 +83,16 @@ target-version = ["py312"]
 line-length = 100
 target-version = "py312"
 select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+markers = [
+    "unit: Unit tests (no external dependencies)",
+    "integration: Integration tests (require services)",
+    "e2e: End-to-end tests",
+    "slow: Tests taking >5 seconds",
+]
+addopts = "-v --tb=short"

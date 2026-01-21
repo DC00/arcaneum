@@ -27,29 +27,304 @@ arc collection create <name> --model <model>  # Create Qdrant collection
 arc collection list                          # List all collections
 arc collection info <name>                    # Show collection details
 arc collection items <name>                   # List indexed files/repos
+arc collection verify <name>                  # Verify collection integrity
+arc collection export <name> -o <file>        # Export to portable format
+arc collection import <file>                  # Import from export file
 arc collection delete <name>                  # Delete collection
 ```
 
 ### Indexing Commands
 
 ```bash
-arc index pdf <path> --collection <name>     # Index PDF files
-arc index code <path> --collection <name>   # Index source code
+arc index pdf <path> --collection <name>      # Index PDFs to Qdrant (semantic)
+arc index code <path> --collection <name>     # Index source code to Qdrant
+arc index text pdf <path> --index <name>      # Index PDFs to MeiliSearch (full-text)
 ```
 
 ### Search Commands
 
 ```bash
-arc search <query> --collection <name>        # Semantic search
-arc search text <query> --index <name>        # Full-text search
+arc search semantic <query> --collection <name>  # Semantic search (Qdrant)
+arc search text <query> --index <name>           # Full-text search (MeiliSearch)
+```
+
+### Full-Text Index Management
+
+MeiliSearch index commands mirror Qdrant collection commands:
+
+| Qdrant (arc collection)   | MeiliSearch (arc indexes) |
+| ------------------------- | ------------------------- |
+| `arc collection create`   | `arc indexes create`      |
+| `arc collection list`     | `arc indexes list`        |
+| `arc collection info`     | `arc indexes info`        |
+| `arc collection delete`   | `arc indexes delete`      |
+
+```bash
+arc indexes create <name> --type <type>   # Create MeiliSearch index
+arc indexes list                        # List all indexes
+arc indexes info <name>                         # Show index details
+arc indexes delete <name>                 # Delete index
+arc indexes update-settings <name> --type <type>  # Update index settings
 ```
 
 ### Dual Indexing (Qdrant + MeiliSearch)
 
+A "corpus" is a paired Qdrant collection and MeiliSearch index with the same name.
+
 ```bash
-arc corpus create <name> --type <type>        # Create dual corpus
-arc corpus sync <path> --corpus <name>     # Dual indexing
+arc corpus create <name> --type <type> --models <model>  # Create both
+arc corpus delete <name>                                 # Delete both
+arc corpus sync <name> <path> [<path>...]                # Index to both (multiple paths supported)
+arc corpus info <name>                                   # Show corpus details
+arc corpus items <name>                                  # List indexed items with parity status
+arc corpus verify <name>                                 # Verify corpus health across both systems
+arc corpus parity <name>                                 # Restore parity between indexes
 ```
+
+**Note:** If you already have a collection and index with the same name, you can
+use `corpus sync` directly - no need to run `corpus create` first.
+
+### Corpus Parity
+
+Check and restore parity between Qdrant and MeiliSearch indexes without scanning
+a directory. This is useful when one index gets out of sync with the other.
+
+```bash
+# Check parity status (dry-run, no changes)
+arc corpus parity MyCorpus --dry-run
+
+# Restore parity with verbose output
+arc corpus parity MyCorpus --verbose
+
+# JSON output for scripting
+arc corpus parity MyCorpus --json
+```
+
+**How it works:**
+
+- Compares indexed file paths in both Qdrant and MeiliSearch
+- Backfills missing entries in each direction:
+  - **Qdrant -> MeiliSearch**: Copies metadata from Qdrant (no file access needed)
+  - **MeiliSearch -> Qdrant**: Re-chunks and embeds files (requires file access)
+- Files that don't exist on disk are skipped with a warning
+
+**Options:**
+
+- `--dry-run`: Show what would be backfilled without making changes
+- `--verify`: Verify chunk counts match between systems (detects partial uploads)
+- `--repair-metadata`: Update MeiliSearch docs with missing git metadata from Qdrant (code corpora only)
+- `--create-missing`: Create missing MeiliSearch indexes for qdrant_only corpora
+- `--confirm`: Skip confirmation prompt when processing all corpora
+- `--verbose`: Show detailed progress for each file
+- `--json`: Output JSON format for scripting
+
+**Example output:**
+
+```text
+Checking parity for corpus 'Papers'...
+Corpus type: pdf, Models: stella
+
+Index Status:
+  Files in both systems:     150
+  Files in Qdrant only:      5
+  Files in MeiliSearch only: 3
+
+Backfilling 5 files to MeiliSearch...
+  ✓ document1.pdf: 12 chunks
+  ✓ document2.pdf: 8 chunks
+
+Backfilling 3 files to Qdrant...
+  ⚠ report.pdf: File not found, skipping
+  ✓ notes.pdf: 15 chunks
+
+✅ Parity restored for corpus 'Papers'
+   Backfilled to MeiliSearch: 5 files (47 chunks)
+   Backfilled to Qdrant: 2 files (23 chunks)
+   Skipped (not found): 1 file
+```
+
+**All-Corpora Mode:**
+
+When run without a corpus name, parity discovers all corpora and processes them:
+
+```bash
+# Discover and process all corpora
+arc corpus parity
+
+# Preview all corpora status
+arc corpus parity --dry-run
+
+# Process all without confirmation prompt
+arc corpus parity --confirm
+```
+
+**Creating Missing Indexes:**
+
+The `--create-missing` flag promotes single-sided Qdrant collections into full corpora
+by automatically creating missing MeiliSearch indexes:
+
+```bash
+# Preview what indexes would be created
+arc corpus parity --create-missing --dry-run
+
+# Create missing indexes and sync
+arc corpus parity --create-missing
+
+# Single corpus: create missing index if needed
+arc corpus parity MyCorpus --create-missing
+```
+
+This is useful when you have Qdrant collections that were indexed before MeiliSearch
+was set up, or when migrating to dual-index workflows.
+
+**Note:** `meili_only` corpora cannot be auto-created because creating a Qdrant
+collection requires specifying `--type` and `--model`. These must be created manually
+with `arc corpus create`.
+
+### Corpus Items
+
+List all indexed items in a corpus with parity status between Qdrant and MeiliSearch:
+
+```bash
+# Human-readable table output
+arc corpus items MyCorpus
+
+# JSON output for automation
+arc corpus items MyCorpus --json
+```
+
+**Features:**
+
+- **Type-aware output**: Different displays for code vs PDF/markdown corpora
+- **Parity status**: Shows sync status for each item (synced, mismatch, qdrant_only, meili_only)
+- **Chunk counts**: Shows chunks in each system (Q and M columns)
+- **Deduplication**: Groups chunks by file/repository
+
+**Code Corpus Output:**
+
+| Project | Branch  | Commit       | Q     | M     | Status   |
+| ------- | ------- | ------------ | ----- | ----- | -------- |
+| my-app  | main    | a1b2c3d4e5f6 | 1,532 | 1,532 | synced   |
+| my-lib  | develop | f6e5d4c3b2a1 | 847   | 800   | mismatch |
+
+**PDF/Markdown Corpus Output:**
+
+| File               | Size  | Q  | M  | Status      |
+| ------------------ | ----- | -- | -- | ----------- |
+| research-paper.pdf | 2.3MB | 42 | 42 | synced      |
+| documentation.md   | 15KB  | 8  | 0  | qdrant_only |
+
+**Status Values:**
+
+- `synced`: Same chunk count in both systems
+- `mismatch`: Different chunk counts (may indicate partial upload)
+- `qdrant_only`: Item exists only in Qdrant
+- `meili_only`: Item exists only in MeiliSearch
+
+### Corpus Verify
+
+Verify corpus health across both Qdrant and MeiliSearch systems:
+
+```bash
+# Basic health check
+arc corpus verify MyCorpus
+
+# Detailed output with file-level results
+arc corpus verify MyCorpus --verbose
+
+# Filter by project (code corpora only)
+arc corpus verify MyCode --project my-app
+
+# JSON output for automation
+arc corpus verify MyCorpus --json
+```
+
+**Features:**
+
+- **Qdrant health check**: Verifies chunk completeness for all indexed items
+- **MeiliSearch health check**: Verifies index accessibility and document retrieval
+- **Parity status**: Reports whether both systems have the corpus
+- **Detailed diagnostics**: Shows warnings for configuration issues
+
+**Example Output:**
+
+```text
+Verifying Qdrant collection 'MyCorpus'...
+Verifying MeiliSearch index 'MyCorpus'...
+
+Corpus: MyCorpus
+Overall Status: Healthy
+
+Qdrant Collection:
+  Status: Healthy
+  Items: 150 (150 complete)
+
+MeiliSearch Index:
+  Status: Healthy
+  Documents: 2,847
+  Sample retrieval: OK
+
+All checks passed
+```
+
+**Options:**
+
+- `--verbose` / `-v`: Show detailed file-level verification results
+- `--project`: Filter by project identifier (code corpora only)
+- `--json`: Output JSON format for scripting
+
+**JSON Output Format:**
+
+```json
+{
+  "status": "success",
+  "message": "Corpus 'MyCorpus' is healthy",
+  "data": {
+    "corpus": "MyCorpus",
+    "overall_healthy": true,
+    "parity_status": "needs_review",
+    "qdrant": {
+      "collection": "MyCorpus",
+      "type": "pdf",
+      "is_healthy": true,
+      "total_points": 2847,
+      "total_items": 150,
+      "complete_items": 150,
+      "incomplete_items": 0
+    },
+    "meilisearch": {
+      "is_healthy": true,
+      "document_count": 2847,
+      "is_indexing": false,
+      "sample_accessible": true,
+      "issues": [],
+      "warnings": []
+    }
+  }
+}
+```
+
+### Corpus Delete
+
+Delete both the Qdrant collection and MeiliSearch index for a corpus:
+
+```bash
+# With confirmation prompt
+arc corpus delete MyCorpus
+
+# Skip confirmation (for scripts)
+arc corpus delete MyCorpus --confirm
+
+# JSON output
+arc corpus delete MyCorpus --confirm --json
+```
+
+**Behavior:**
+
+- Checks if either Qdrant collection or MeiliSearch index exists
+- Prompts for confirmation before deleting (unless `--confirm` is passed)
+- Deletes both systems; if one fails, continues with the other
+- Reports partial deletion if only one system was deleted
 
 ## Collection Management Examples
 
@@ -141,19 +416,19 @@ arc collection items MyCode --json
 
 Shows repositories with git metadata:
 
-| Project | Branch | Commit | Chunks |
-|---------|--------|--------|--------|
-| my-app | main | a1b2c3d4e5f6 | 1,532 |
-| my-lib | develop | f6e5d4c3b2a1 | 847 |
+| Project | Branch  | Commit       | Chunks |
+| ------- | ------- | ------------ | ------ |
+| my-app  | main    | a1b2c3d4e5f6 | 1,532  |
+| my-lib  | develop | f6e5d4c3b2a1 | 847    |
 
 **PDF/Markdown Collections Output:**
 
 Shows files with size information:
 
-| File | Size | Chunks |
-|------|------|--------|
-| research-paper.pdf | 2.3MB | 42 |
-| documentation.md | 15.2KB | 8 |
+| File               | Size   | Chunks |
+| ------------------ | ------ | ------ |
+| research-paper.pdf | 2.3MB  | 42     |
+| documentation.md   | 15.2KB | 8      |
 
 **JSON Output Format:**
 
@@ -186,6 +461,117 @@ Shows files with size information:
 - Check which branches are indexed
 - Count total chunks per file/repo
 - Export collection metadata for reporting
+
+### Export Collection
+
+Export a collection to a portable format for migration or backup:
+
+```bash
+# Default: Compressed binary format (.arcexp)
+arc collection export MyPDFs -o backup.arcexp
+
+# Human-readable JSONL format (for debugging)
+arc collection export MyPDFs -o backup.jsonl --format jsonl
+
+# Filter by file path patterns
+arc collection export MyPDFs -o reports.arcexp --include "*/reports/*.pdf"
+arc collection export MyPDFs -o subset.arcexp --exclude "*/drafts/*"
+
+# Filter code collections by repo
+arc collection export MyCode -o arcaneum.arcexp --repo arcaneum
+arc collection export MyCode -o main-only.arcexp --repo arcaneum#main
+
+# Combined filters
+arc collection export MyCode -o subset.arcexp \
+    --include "*/src/*" \
+    --repo arcaneum#main \
+    --exclude "*/test/*"
+
+# Detached export (strips root prefix for shareable archives)
+arc collection export MyCode -o shareable.arcexp --detach
+
+# JSON output for scripting
+arc collection export MyPDFs -o backup.arcexp --json
+```
+
+**Filter Options:**
+
+| Option               | Description                                  | Example                |
+| -------------------- | -------------------------------------------- | ---------------------- |
+| `--include`          | Include files matching glob (multiple = OR)  | `--include "*.pdf"`    |
+| `--exclude`          | Exclude files matching glob (multiple = AND) | `--exclude "*/temp/*"` |
+| `--repo`             | Filter by repo name (code collections)       | `--repo arcaneum`      |
+| `--repo name#branch` | Filter by repo and branch                    | `--repo arcaneum#main` |
+| `--detach`           | Strip root prefix, store relative paths      | `--detach`             |
+
+**Export Formats:**
+
+| Format | Extension | Size         | Use Case                    |
+| ------ | --------- | ------------ | --------------------------- |
+| Binary | `.arcexp` | ~10x smaller | Migration, backup (default) |
+| JSONL  | `.jsonl`  | Larger       | Debugging, inspection       |
+
+### Import Collection
+
+Import a collection from an export file:
+
+```bash
+# Import to original collection name
+arc collection import backup.arcexp
+
+# Import to different collection name
+arc collection import backup.arcexp --into MyPDFs-restored
+
+# Import detached export with new root path
+arc collection import shareable.arcexp --attach /home/bob/projects
+
+# Remap paths for cross-machine migration
+arc collection import backup.arcexp --remap /Users/alice/docs:/home/bob/docs
+
+# Multiple path remappings
+arc collection import backup.arcexp \
+    --remap /Users/alice/repos:/home/bob/repos \
+    --remap /Users/alice/docs:/home/bob/documents
+
+# JSON output for scripting
+arc collection import backup.arcexp --json
+```
+
+**Path Handling Options:**
+
+| Option            | Description                    | Use Case                 |
+| ----------------- | ------------------------------ | ------------------------ |
+| `--into`          | Target collection name         | Import to different name |
+| `--attach`        | Prepend root to relative paths | For detached exports     |
+| `--remap old:new` | Substitute path prefixes       | Cross-machine migration  |
+
+**Format Auto-Detection:**
+
+Import automatically detects file format (binary or JSONL) from file content.
+
+**Cross-Machine Migration Workflow:**
+
+```bash
+# On source machine: Export with detach
+arc collection export MyCode -o shareable.arcexp --detach
+# Transfer shareable.arcexp to new machine...
+
+# On target machine: Import with attach
+arc collection import shareable.arcexp --attach /home/newuser/projects
+```
+
+**Path Remapping Workflow (non-detached):**
+
+```bash
+# On source machine: Export normally
+arc collection export MyDocs -o backup.arcexp
+# Transfer backup.arcexp to new machine...
+
+# On target machine: Import with path remapping
+arc collection import backup.arcexp \
+    --remap /Users/alice:/home/bob \
+    --into MyDocs-migrated
+```
 
 ## PDF Indexing Examples
 
@@ -246,16 +632,88 @@ creation time with `arc collection create --type pdf`.
 arc index pdf /path/to/pdfs --collection pdf-docs --debug
 ```
 
+## PDF Full-Text Indexing (MeiliSearch)
+
+Index PDFs to MeiliSearch for exact phrase and keyword search, complementing
+semantic search in Qdrant. This mirrors the `arc collection` commands for Qdrant
+with `arc indexes` commands for MeiliSearch.
+
+### Basic Usage
+
+```bash
+# Create MeiliSearch index first (mirrors arc collection create)
+arc indexes create pdf-docs --type pdf
+
+# Index PDFs to MeiliSearch
+arc index text pdf /path/to/pdfs --index pdf-docs
+```
+
+### Command Options
+
+```bash
+arc index text pdf <directory> --index <name> [options]
+```
+
+**Options:**
+
+- `--index`: Target MeiliSearch index name (required)
+- `--recursive / --no-recursive`: Search subdirectories (default: recursive)
+- `--force`: Force reindex all files (skip change detection)
+- `--ocr / --no-ocr`: Enable/disable OCR for scanned PDFs (default: enabled)
+- `--ocr-language`: OCR language code (default: eng)
+- `--batch-size`: Documents per batch upload (default: 1000)
+- `--verbose`: Show detailed progress
+- `--json`: JSON output for scripting
+
+### Examples
+
+```bash
+# Index with OCR for scanned documents
+arc index text pdf ./scanned-docs --index pdf-docs --ocr-language eng
+
+# Force reindex all
+arc index text pdf ./pdfs --index pdf-docs --force
+
+# Disable OCR (text-only PDFs)
+arc index text pdf ./text-pdfs --index pdf-docs --no-ocr
+
+# JSON output
+arc index text pdf ./pdfs --index pdf-docs --json
+```
+
+### Dual Indexing Workflow
+
+For comprehensive search, index to both Qdrant and MeiliSearch.
+The CLI commands mirror each other: `arc collection` for Qdrant, `arc indexes` for MeiliSearch:
+
+```bash
+# Create both collection and index (mirrored commands)
+arc collection create pdf-docs --type pdf      # Qdrant
+arc indexes create pdf-docs --type pdf  # MeiliSearch
+
+# Index to Qdrant (semantic search)
+arc index pdf /path/to/pdfs --collection pdf-docs
+
+# Index to MeiliSearch (full-text search)
+arc index text pdf /path/to/pdfs --index pdf-docs
+
+# Semantic search (conceptual matches)
+arc search semantic "machine learning" --collection pdf-docs
+
+# Full-text search (exact phrases)
+arc search text '"neural network"' --index pdf-docs
+```
+
 ## Model Selection
 
 ### General Purpose Models
 
-| Model | Dimensions | Best For | Late Chunking |
-|-------|------------|----------|---------------|
-| `stella` | 1024D | Long documents, general purpose | ✅ |
-| `bge` | 1024D | Precision, short documents | ❌ |
-| `modernbert` | 768D | Long context, recent content | ✅ |
-| `jina` | 768D | Code + text, multilingual | ✅ |
+| Model        | Dimensions | Best For                        | Late Chunking |
+| ------------ | ---------- | ------------------------------- | ------------- |
+| `stella`     | 1024D      | Long documents, general purpose | Yes           |
+| `bge`        | 1024D      | Precision, short documents      | No            |
+| `modernbert` | 768D       | Long context, recent content    | Yes           |
+| `jina`       | 768D       | Code + text, multilingual       | Yes           |
 
 ### Code-Specific Models
 
@@ -263,13 +721,13 @@ arc index pdf /path/to/pdfs --collection pdf-docs --debug
 
 For source code indexing, use specialized code models optimized for programming languages:
 
-| Model | Dimensions | Context | Best For | Notes |
-|-------|------------|---------|----------|-------|
-| `jina-code-0.5b` | 896D | 32K | **Fastest, balanced** | ⚡ SOTA Sept 2025, optimal speed/quality |
-| `jina-code-1.5b` | 1536D | 32K | Highest quality | SOTA Sept 2025, slower but best accuracy |
-| `jina-code` | 768D | 8K | Legacy | v2 model, superseded by above |
-| `codesage-large` | 1024D | - | 9 languages | CodeSage V2, Dec 2024 |
-| `nomic-code` | 3584D | - | 6 languages | 7B params, highest quality, slowest |
+| Model            | Dimensions | Context | Best For              | Notes                                    |
+| ---------------- | ---------- | ------- | --------------------- | ---------------------------------------- |
+| `jina-code-0.5b` | 896D       | 32K     | **Fastest, balanced** | SOTA Sept 2025, optimal speed/quality    |
+| `jina-code-1.5b` | 1536D      | 32K     | Highest quality       | SOTA Sept 2025, slower but best accuracy |
+| `jina-code`      | 768D       | 8K      | Legacy                | v2 model, superseded by above            |
+| `codesage-large` | 1024D      | -       | 9 languages           | CodeSage V2, Dec 2024                    |
+| `nomic-code`     | 3584D      | -       | 6 languages           | 7B params, highest quality, slowest      |
 
 **Recommendation:** Use `jina-code-0.5b` for code collections. It provides the best balance of speed and quality
 with 32K context window support.
@@ -399,8 +857,12 @@ Configure via environment or `.env` file:
 ```bash
 QDRANT_URL=http://localhost:6333
 MEILISEARCH_URL=http://localhost:7700
-MEILISEARCH_API_KEY=your-api-key
+MEILISEARCH_API_KEY=your-api-key  # Optional: auto-generated if not set
 ```
+
+Note: `MEILISEARCH_API_KEY` is auto-generated on first `arc container start` and stored
+in `~/.config/arcaneum/meilisearch.key`. You only need to set it manually if you want
+to use a custom key or share the same key across machines.
 
 ## For Claude Code Agents
 
@@ -414,6 +876,82 @@ The `arc` CLI is the entrypoint for all Claude Code plugins and slash commands:
 ```
 
 See individual slash command files in `/commands/` directory for detailed usage.
+
+## Full-Text Search (MeiliSearch)
+
+Full-text search provides exact phrase matching, typo-tolerant keyword search, and filtered queries.
+
+### Create Index
+
+```bash
+# Create index with type-specific settings
+arc indexes create source-code --type source-code
+arc indexes create pdf-docs --type pdf
+arc indexes create my-docs --type markdown
+
+# List all indexes
+arc indexes list
+
+# Show index details
+arc indexes info source-code
+
+# Delete index
+arc indexes delete source-code --confirm
+```
+
+**Index Types:**
+
+| Type            | Aliases    | Optimized For                    |
+| --------------- | ---------- | -------------------------------- |
+| `source-code`   | `code`     | Code with higher typo thresholds |
+| `pdf-docs`      | `pdf`      | PDF documents with stop words    |
+| `markdown-docs` | `markdown` | Markdown with headings search    |
+
+### Search
+
+```bash
+# Basic search
+arc search text "authentication" --index source-code
+
+# Exact phrase search (use quotes)
+arc search text '"def authenticate"' --index source-code
+
+# With filter
+arc search text "authentication" --index source-code --filter "language = python"
+
+# With pagination
+arc search text "query" --index source-code --limit 20 --offset 10
+
+# JSON output
+arc search text "query" --index source-code --json
+```
+
+**Filter Syntax:**
+
+```bash
+# Single filter
+--filter "language = python"
+
+# Multiple conditions
+--filter "language = python AND project = myapp"
+
+# Numeric comparison
+--filter "page_number > 10"
+```
+
+### Configuration
+
+MeiliSearch API key is auto-generated on first `arc container start` and stored in:
+
+```text
+~/.config/arcaneum/meilisearch.key
+```
+
+To override, set the environment variable:
+
+```bash
+export MEILISEARCH_API_KEY=your-custom-key
+```
 
 ## Service Management
 
@@ -468,9 +1006,9 @@ arc container reset --confirm
 
 **Data Location:**
 
-- All data stored in `~/.arcaneum/data/qdrant/`
+- Qdrant and MeiliSearch use Docker named volumes for persistence
 - Survives container restarts
-- Easy to backup
+- Easy backup via Qdrant snapshots
 
 ## Configuration & Cache Management
 
@@ -493,9 +1031,9 @@ arc config clear-cache --confirm
 arc config show-cache-dir
 # Output:
 #   Arcaneum directories:
-#     Root:   /Users/you/.arcaneum
-#     Models: /Users/you/.arcaneum/models
-#     Data:   /Users/you/.arcaneum/data
+#     Cache:  /Users/you/.cache/arcaneum
+#     Data:   /Users/you/.local/share/arcaneum
+#     Config: /Users/you/.config/arcaneum
 #     Models size: 2.5 GB
 #     Data size: 266.8 MB
 
@@ -505,7 +1043,7 @@ arc config clear-cache --confirm
 
 **Cache Location:**
 
-- Models stored in `~/.arcaneum/models/`
+- Models stored in `~/.cache/arcaneum/models/`
 - Auto-downloaded on first use
 - Shared across all arc commands
 - ~1-2GB per model
