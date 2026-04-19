@@ -96,6 +96,9 @@ Changelog = "https://github.com/cwensel/arcaneum/releases"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"arcaneum.deploy" = ["*.yml", "*.yaml"]
+
 [tool.black]
 line-length = 100
 target-version = ["py312"]

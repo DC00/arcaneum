@@ -3,6 +3,7 @@
 import subprocess
 import time
 import shutil
+from importlib import resources
 import click
 from pathlib import Path
 import requests
@@ -35,25 +36,27 @@ def check_docker_available():
 
 
 def get_compose_file():
-    """Get the path to docker-compose.yml."""
-    # Find the repository root directory
-    # This file is at: src/arcaneum/cli/docker.py
-    # We need to go up 3 levels to get to repo root: cli/ -> arcaneum/ -> src/ -> root/
-    repo_root = Path(__file__).parent.parent.parent.parent
+    """Get the path to docker-compose.yml.
 
-    # Try repo deploy/ directory first, then current directory as fallback
-    compose_paths = [
-        repo_root / "deploy" / "docker-compose.yml",
-        Path("docker-compose.yml"),
-        Path("deploy/docker-compose.yml"),
-    ]
-
-    for path in compose_paths:
+    Prefers a compose file in the current working directory (so users can
+    override), then falls back to the compose file shipped inside the
+    installed package.
+    """
+    # Let the caller override with a local compose file first.
+    for path in (Path("docker-compose.yml"), Path("deploy/docker-compose.yml")):
         if path.exists():
             return str(path.resolve())
 
+    # Fall back to the file shipped inside the package.
+    try:
+        packaged = resources.files("arcaneum.deploy").joinpath("docker-compose.yml")
+        if packaged.is_file():
+            return str(Path(str(packaged)).resolve())
+    except (ModuleNotFoundError, FileNotFoundError):
+        pass
+
     print_error("docker-compose.yml not found")
-    print_info(f"Expected locations: {repo_root}/deploy/docker-compose.yml or ./docker-compose.yml")
+    print_info("Expected: ./docker-compose.yml, ./deploy/docker-compose.yml, or the packaged arcaneum.deploy/docker-compose.yml")
     return None
 
 
